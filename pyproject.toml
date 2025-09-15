@@ -43,6 +43,7 @@ full = [
     "rich",
     "dissect.target[full]>=3.23,<4",
     "requests_toolbelt",
+    "zstandard>=0.24.0",
 ]
 dev = [
     "acquire[full]",

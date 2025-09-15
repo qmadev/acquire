@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import io
 import tarfile
+import sys
 from typing import TYPE_CHECKING, BinaryIO
 
 from acquire.crypt import EncryptedStream
 from acquire.outputs.base import Output
 
+if sys.version_info < (3, 14):
+    try:
+        from zstandard import ZstdCompressor
+        HAS_ZSTDLIB = True
+    except ImportError:
+        HAS_ZSTDLIB = False
+
+    
 if TYPE_CHECKING:
     from pathlib import Path
 
     from dissect.target.filesystem import FilesystemEntry
 
-TAR_COMPRESSION_METHODS = {"gzip": "gz", "bzip2": "bz2", "xz": "xz"}
+TAR_COMPRESSION_METHODS = {"gzip": "gz", "bzip2": "bz2", "xz": "xz", "zstd": "zst"}
 
 
 class TarOutput(Output):
@@ -21,7 +30,7 @@ class TarOutput(Output):
     Args:
         path: The path to write the tar archive to.
         compress: Whether to compress the tar archive.
-        compression_method: Compression method to use (Default: gzip). Supports "gzip", "bzip2", "xz".
+        compression_method: Compression method to use (Default: gzip). Supports "gzip", "bzip2", "xz", "zstd".
         encrypt: Whether to encrypt the tar archive.
         public_key: The RSA public key to encrypt the header with.
     """
@@ -41,8 +50,13 @@ class TarOutput(Output):
         if compress:
             self.compression = TAR_COMPRESSION_METHODS.get(compression_method, "gz")
 
+            if compression_method == "zstd" and EXTERNAL_ZSTD:
+                self.zstd_compressor = ZstdCompressor()
+                mode = "w|"
+            else:
+                mode += self.compression
+
             ext += f".{self.compression}" if f".{self.compression}" not in path.suffixes else ""
-            mode += self.compression
 
         if encrypt:
             ext += ".enc"
@@ -50,9 +64,18 @@ class TarOutput(Output):
         self._fh = None
         self.path = path.with_suffix(path.suffix + ext)
 
-        if encrypt:
-            self._fh = EncryptedStream(self.path.open("wb"), public_key)
+        # We need to fix our encryption/zstd streams ourselves < Python 3.14
+        if encrypt and compression_method == "zstd" and EXTERNAL_ZSTD:
+            encrypted_stream = EncryptedStream(self.path.open("wb"), public_key)
+            self._fh = self.zstd_compressor.stream_writer(writer=encrypted_stream)
             self.tar = tarfile.open(fileobj=self._fh, mode=mode)  # noqa: SIM115
+        elif compression_method == "zstd" and EXTERNAL_ZSTD:
+            self._fh = self.zstd_compressor.stream_writer(self.path.open("wb"))
+            self.tar = tarfile.open(fileobj=self._fh, mode=mode)  # noqa: SIM115
+        # > Python 3.14, zstd support is included in tarfile
+        elif encrypt:
+            self._fh = EncryptedStream(self.path.open("wb"), public_key)
+            self.tar = tarfile.open(fileobj=self._fh, mode=mode) # noqa: SIM115
         else:
             self.tar = tarfile.open(name=self.path, mode=mode)  # noqa: SIM115
 
